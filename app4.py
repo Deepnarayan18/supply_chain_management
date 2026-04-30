@@ -22,7 +22,12 @@ from geopy.adapters import AioHTTPAdapter
 from geopy.geocoders import ArcGIS, Nominatim
 
 # --- CONFIGURATION & API KEYS ---
-st.set_page_config(page_title="Supply Chain Intelligence Nexus", layout="wide")
+# Set page layout and ensure the sidebar is always expanded by default
+st.set_page_config(
+    page_title="Supply Chain Intelligence Nexus", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 TIMEOUT = 15
 MAX_RETRIES = 3
@@ -71,6 +76,7 @@ async def get_openweather(lat: float, lon: float) -> Dict[str, Any]:
     except Exception: pass
     return {"temp": "N/A", "condition": "N/A"}
 
+
 async def get_marine_weather(lat: float, lon: float) -> str:
     url = f"https://marine-api.open-meteo.com/v1/marine?latitude={lat}&longitude={lon}&current=wave_height"
     try:
@@ -85,6 +91,7 @@ async def get_marine_weather(lat: float, lon: float) -> str:
                             return f"{val} m" if val is not None else "N/A"
     except Exception: pass
     return "N/A"
+
 
 async def fetch_real_news_for_location(full_address: str) -> str:
     parts = [p.strip() for p in full_address.split(',')]
@@ -117,6 +124,7 @@ async def fetch_real_news_for_location(full_address: str) -> str:
         pass
         
     return f"✅ No disruptive news detected for {city_name} recently."
+
 
 async def get_marine_region_name(lat: float, lon: float) -> str:
     url = f"https://marineregions.org/rest/getGazetteerRecordsByLatLong.json/{lat}/{lon}/"
@@ -177,7 +185,8 @@ def get_llm_risk_assessment(location: str, lat: float, lon: float, mode: str, te
     except Exception:
         return {"Risk": "Medium", "Details": f"Regional risk assessment unavailable for: {location}"}
 
-def generate_rerouting_suggestion(milestones: List[Dict[str, Any]], mode: str, origin: str, dest: str, primary_distance: float, alt_info: str) -> str:
+
+def generate_rerouting_suggestion(milestones: List[Dict[str, Any]], mode: str, origin: str, dest: str, primary_distance: float, alt_info: str, alt_milestones: List[Dict[str, Any]]) -> str:
     context = ""
     for m in milestones:
         if m['Risk Level'] in ['High', 'Critical']:
@@ -186,33 +195,49 @@ def generate_rerouting_suggestion(milestones: List[Dict[str, Any]], mode: str, o
     if not context:
         context = "No severe high-risk bottlenecks identified along the primary route."
         
+    alt_context = "No real-time alternative data available."
+    if alt_milestones:
+        alt_context = ""
+        for am in alt_milestones:
+            alt_context += f"- Alt Region: {am['Location']} | Risk: {am['Risk Level']} | Weather: {am['Weather']}, {am['Temp (°C)']}°C | Intel: {am['Local News']}\n"
+
     prompt = f"""
-    You are the Lead Supply Chain Intelligence Director. Write a professional intelligence briefing for the logistics team.
+    You are the Lead Supply Chain Intelligence Director providing a final, definitive routing decision to fleet operators.
     
     Route: {origin} to {dest} ({mode})
     Primary Route Length: {primary_distance:.1f} km
-    
-    Identified Bottlenecks on Primary Route:
+    Primary Route Real-Time Bottlenecks & Intel:
     {context}
     
     Alternative Route Logistics Data:
     {alt_info}
+    Alternative Route Real-Time Intel:
+    {alt_context}
     
-    Write a 2-paragraph operational briefing:
-    1. Assess the viability and safety of the primary route based on the bottlenecks.
-    2. Provide a clear, authoritative recommendation on whether logistics managers should authorize the primary route or switch to the alternative route.
+    Write a highly detailed, professional Executive Briefing with EXACTLY this structure:
+    
+    ### 🔴 Primary Route Assessment
+    [Evaluate the real-time safety, weather, and news risks of the primary path based strictly on the intel provided.]
+    
+    ### 🟡 Alternative Route Assessment
+    [Evaluate the real-time safety, weather, and news risks of the alternative path based strictly on the intel provided.]
+    
+    ### ✅ Definitive Recommendation
+    [State exactly which route to take in one clear sentence.]
+    
+    ### 💡 Why This Route is Superior
+    [Explicitly explain WHY the recommended route is better. Directly compare the real-time intel, weather, risk levels, and the distance trade-off. Explain how avoiding the specific risks on the bad route makes the extra distance mathematically and operationally worth it for the logistics team.]
     
     CRITICAL RULES:
     - NEVER use words like "API", "OSRM", "Algorithm", "Calculated", "Groq", or "Llama".
-    - Frame the alternative route as "Intelligence gathered by our geospatial systems" or "Our recommended deviation."
-    - MUST explicitly name the alternative cities/regions provided in the Alternative Route Logistics Data so the driver knows where to go.
+    - Make the analysis definitive, highly technical, and end-to-end helpful for a logistics manager deciding whether to accept a detour.
     """
     try:
         completion = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3, 
-            max_completion_tokens=512,
+            max_completion_tokens=600,
             top_p=1,
             stream=False,
             stop=None
@@ -225,38 +250,55 @@ def generate_rerouting_suggestion(milestones: List[Dict[str, Any]], mode: str, o
     except Exception:
         return "Strategic intelligence briefing unavailable at this time."
 
-def generate_chart_insight(milestones: List[Dict[str, Any]], primary_dist: float, alt_dist: float) -> str:
-    """Generates a dynamic 1-sentence explanation for the chart comparing the two routes."""
-    high_risks = [m['Location'] for m in milestones if m['Risk Level'] in ['High', 'Critical']]
+
+def generate_chart_insight(milestones: List[Dict[str, Any]], alt_milestones: List[Dict[str, Any]], primary_dist: float, alt_dist: float) -> str:
+    """Generates a detailed, technical logistics insight based on real-time API data comparing both routes."""
     
-    if not high_risks:
-        return "Since there are no critical bottlenecks on the primary path, deviations are unnecessary and would only result in increased fuel consumption and delay."
-        
-    places = ", ".join(high_risks[:2])
+    primary_risks = [m for m in milestones if m['Risk Level'] in ['High', 'Critical']]
+    primary_context = "Clear conditions."
+    if primary_risks:
+        worst_primary = primary_risks[0]
+        primary_context = f"Critical bottleneck at {worst_primary['Location']}. Weather: {worst_primary['Weather']}, {worst_primary['Temp (°C)']}°C. Intel: {worst_primary['Local News']}. Risk: {worst_primary['Risk Level']}."
+
+    alt_context = "No alternative data mapped."
+    if alt_milestones:
+        worst_alt = max(alt_milestones, key=lambda x: ['Low', 'Medium', 'High', 'Critical'].index(x.get('Risk Level', 'Low')))
+        alt_context = f"Alt path via {worst_alt['Location']} shows Risk: {worst_alt['Risk Level']}. Weather: {worst_alt['Weather']}, {worst_alt['Temp (°C)']}°C. Intel: {worst_alt['Local News']}."
+
     dist_diff = alt_dist - primary_dist
     
+    if not primary_risks:
+        return "Logistics telemetry indicates stable conditions across the primary corridor. The proposed deviation yields negative ROI, as the increased fuel expenditure and transit delay provide no proportional reduction in operational risk."
+        
     prompt = f"""
-    Write a ONE SENTENCE professional logistics insight.
-    The primary route passes through dangerous high-risk zones ({places}).
-    The alternative route avoids these zones but adds {dist_diff:.1f} km to the journey.
-    Explain why accepting this extra distance is the safer, strategic choice based on real-time risks.
-    Keep it strictly under 30 words.
+    You are a Senior Logistics Operations Analyst. Write a technical, data-driven analysis justifying the route deviation shown in the chart.
+    
+    Data Feeds:
+    - Primary Route Real-Time Intel: {primary_context}
+    - Alternative Route Delta: +{dist_diff:.1f} km detour
+    - Alternative Route Real-Time Intel: {alt_context}
+    
+    Task:
+    Write a definitive, 3-4 sentence technical analysis explaining exactly why accepting the {dist_diff:.1f} km detour is the mathematically and operationally superior choice. 
+    Explicitly compare the specific weather conditions or news events provided in the intel to prove why the alternative route is safer.
+    Do not use introductory filler.
     """
+    
     try:
         completion = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.4, 
-            max_completion_tokens=100,
+            temperature=0.3, 
+            max_completion_tokens=200,
             stream=False
         )
         content = completion.choices[0].message.content
         if content is not None:
             return content.strip()
         else:
-            return f"Although the deviation adds {dist_diff:.1f} km, it strategically bypasses the high-risk disruptions detected in {places}."
+            return f"Telemetry indicates severe operational friction on the primary path. The +{dist_diff:.1f} km deviation optimizes risk-adjusted transit times based on current weather and event data."
     except Exception:
-        return f"Although the deviation adds {dist_diff:.1f} km, it strategically bypasses the high-risk disruptions detected in {places}."
+        return f"Telemetry indicates severe operational friction on the primary path. The +{dist_diff:.1f} km deviation optimizes risk-adjusted transit times based on current weather and event data."
 
 
 # --- 3. GEOSPATIAL LOGIC ROUTERS ---
@@ -268,6 +310,7 @@ async def geocode_place_arcgis(place_name: str, geolocator: ArcGIS) -> Optional[
         except Exception: await asyncio.sleep(1)
     return None
 
+
 async def calculate_road_route(src: str, dest: str) -> Dict[str, Any]:
     async with ArcGIS(adapter_factory=AioHTTPAdapter) as geolocator:
         origin = await geocode_place_arcgis(src, geolocator)
@@ -277,11 +320,34 @@ async def calculate_road_route(src: str, dest: str) -> Dict[str, Any]:
         url = f"{OSRM_BASE_URL}/route/v1/driving/{origin['lon']},{origin['lat']};{dest_loc['lon']},{dest_loc['lat']}"
         params = {"overview": "full", "geometries": "geojson", "steps": "true", "alternatives": "true"}
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
-                data = await resp.json()
+        # INCREASED TIMEOUT: 45 seconds for long international routes
+        timeout_config = aiohttp.ClientTimeout(total=45)
+        
+        data = None
+        try:
+            async with aiohttp.ClientSession(timeout=timeout_config) as session:
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                    else:
+                        return {"error": f"Routing server returned status {resp.status}. The distance may be too long for the public API."}
+        except asyncio.TimeoutError:
+            # FALLBACK: If alternative routes take too long, try again asking for ONLY the primary route
+            params["alternatives"] = "false"
+            try:
+                async with aiohttp.ClientSession(timeout=timeout_config) as session:
+                    async with session.get(url, params=params) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                        else:
+                            return {"error": "Routing server timeout. The route between these two cities is too complex."}
+            except Exception:
+                return {"error": "The public routing server timed out. This usually happens for routes over 2,000 km. Please try closer cities."}
+        except Exception as e:
+            return {"error": f"Failed to connect to the routing server: {str(e)}"}
 
-        if not isinstance(data, dict) or data.get("code") != "Ok": return {"error": "Primary route generation failed."}
+        if not data or not isinstance(data, dict) or data.get("code") != "Ok": 
+            return {"error": "Primary route generation failed. The routing engine could not find a valid road path between these locations."}
         
         routes = data.get("routes", [])
         primary_route = routes[0]
@@ -294,6 +360,7 @@ async def calculate_road_route(src: str, dest: str) -> Dict[str, Any]:
         alt_distance = 0
         alt_duration = 0
         alt_info = "No geographical alternative route is currently mapped for this corridor. Logistics must proceed with caution on the primary path."
+        alt_milestones = []
         
         if len(routes) > 1:
             alt_route = routes[1]
@@ -303,14 +370,15 @@ async def calculate_road_route(src: str, dest: str) -> Dict[str, Any]:
             
             alt_waypoints_text = ""
             if len(alt_coords) > 10:
-                idx_25 = len(alt_coords) // 4
-                idx_50 = len(alt_coords) // 2
-                idx_75 = len(alt_coords) * 3 // 4
-                sample_pts = [alt_coords[idx_25], alt_coords[idx_50], alt_coords[idx_75]]
+                # Sample points on the alternative route to check real-time risk
+                idx_33 = len(alt_coords) // 3
+                idx_66 = len(alt_coords) * 2 // 3
+                sample_pts = [alt_coords[idx_33], alt_coords[idx_66]]
                 alt_places = []
                 
                 for pt in sample_pts:
                     lon, lat = pt
+                    place = f"Alternative Highway near Lat: {round(lat,2)}"
                     try:
                         rev = await geolocator.reverse(f"{lat}, {lon}", timeout=TIMEOUT) # type: ignore
                         if rev and getattr(rev, "address", None):
@@ -319,11 +387,23 @@ async def calculate_road_route(src: str, dest: str) -> Dict[str, Any]:
                                 place = f"{parts[-3].strip()}, {parts[-2].strip()}"
                             else:
                                 place = parts[0].strip()
-                            if place not in alt_places:
-                                alt_places.append(place)
                     except Exception:
                         pass
-                
+                    
+                    if place not in alt_places:
+                        alt_places.append(place)
+                    
+                    # Fetch real-time data for alternative route
+                    weather = await get_openweather(lat, lon)
+                    local_news = await fetch_real_news_for_location(place)
+                    llm_eval = get_llm_risk_assessment(place, lat, lon, "Roadways", weather["temp"], weather["condition"], "N/A", local_news)
+                    
+                    alt_milestones.append({
+                        "Location": place, "Lat": lat, "Lon": lon,
+                        "Temp (°C)": weather["temp"], "Weather": weather["condition"],
+                        "Local News": local_news, "Risk Level": llm_eval["Risk"], "AI Intelligence": llm_eval["Details"]
+                    })
+
                 if alt_places:
                     alt_waypoints_text = f" This strategic deviation physically routes through the following regions: {', '.join(alt_places)}."
 
@@ -377,8 +457,10 @@ async def calculate_road_route(src: str, dest: str) -> Dict[str, Any]:
             "alt_distance": alt_distance,
             "alt_duration": alt_duration,
             "milestones": milestones,
+            "alt_milestones": alt_milestones,
             "alt_info": alt_info
         }
+
 
 async def get_coordinates_nominatim(place_name: str) -> Optional[List[float]]:
     async with Nominatim(user_agent=USER_AGENT, adapter_factory=AioHTTPAdapter) as geolocator:
@@ -387,6 +469,7 @@ async def get_coordinates_nominatim(place_name: str) -> Optional[List[float]]:
             if location: return [location.longitude, location.latitude]
         except Exception: pass
     return None
+
 
 async def calculate_sea_route(src: str, dest: str) -> Dict[str, Any]:
     origin = await get_coordinates_nominatim(src)
@@ -439,6 +522,7 @@ async def calculate_sea_route(src: str, dest: str) -> Dict[str, Any]:
         "alt_distance": 0,
         "alt_duration": 0,
         "milestones": milestones,
+        "alt_milestones": [],
         "alt_info": "Alternative maritime deviations must be planned by the harbormaster depending on specific port congestion."
     }
 
@@ -451,7 +535,14 @@ def generate_matplotlib_charts(df: pd.DataFrame, result: Dict[str, Any], mode: s
     # First Row of Charts
     col1, col2 = st.columns(2)
     with col1:
-        st.write("### 🌡️ Temperature Trends")
+        st.markdown("""
+            <div style='display: flex; align-items: center; gap: 8px; margin-bottom: 10px;'>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#d62728" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"></path>
+                </svg>
+                <h4 style='margin: 0; color: #1E293B;'>Temperature Trends</h4>
+            </div>
+        """, unsafe_allow_html=True)
         df_temp = df[df['Temp (°C)'] != 'N/A'].copy()
         if not df_temp.empty:
             x_vals = [str(x) for x in df_temp['Step']]
@@ -466,7 +557,16 @@ def generate_matplotlib_charts(df: pd.DataFrame, result: Dict[str, Any], mode: s
             st.info("No temperature data available.")
 
     with col2:
-        st.write("### ⚠️ Risk Level Distribution")
+        st.markdown("""
+            <div style='display: flex; align-items: center; gap: 8px; margin-bottom: 10px;'>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ff7f0e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                    <line x1="12" y1="9" x2="12" y2="13"></line>
+                    <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                </svg>
+                <h4 style='margin: 0; color: #1E293B;'>Risk Level Distribution</h4>
+            </div>
+        """, unsafe_allow_html=True)
         colors_dict = {'Low': '#2ca02c', 'Medium': '#ff7f0e', 'High': '#d62728', 'Critical': '#8c564b'}
         risk_list = list(df['Risk Level'])
         risk_counts = {}
@@ -489,7 +589,14 @@ def generate_matplotlib_charts(df: pd.DataFrame, result: Dict[str, Any], mode: s
     col3, col4 = st.columns(2)
     with col3:
         if mode == "Seaways":
-            st.write("### 🌊 Marine Wave Heights")
+            st.markdown("""
+                <div style='display: flex; align-items: center; gap: 8px; margin-bottom: 10px;'>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#1f77b4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M2 12h4l2-9 4 18 2-9h4"></path>
+                    </svg>
+                    <h4 style='margin: 0; color: #1E293B;'>Marine Wave Heights</h4>
+                </div>
+            """, unsafe_allow_html=True)
             df_waves = df[df['Wave Height'] != 'N/A'].copy()
             if not df_waves.empty:
                 y_waves = [float(str(x).replace(' m', '')) for x in df_waves['Wave Height']]
@@ -503,11 +610,28 @@ def generate_matplotlib_charts(df: pd.DataFrame, result: Dict[str, Any], mode: s
             else:
                 st.info("No wave data available.")
         else:
-            st.write("### 🛣️ Traffic & Road Conditions")
+            st.markdown("""
+                <div style='display: flex; align-items: center; gap: 8px; margin-bottom: 10px;'>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                        <line x1="3" y1="9" x2="21" y2="9"></line>
+                        <line x1="9" y1="21" x2="9" y2="9"></line>
+                    </svg>
+                    <h4 style='margin: 0; color: #1E293B;'>Traffic & Road Conditions</h4>
+                </div>
+            """, unsafe_allow_html=True)
             st.info("This metric is reserved for Seaway maritime tracking.")
 
     with col4:
-        st.write("### 📍 Route Geographic Scatter Plot")
+        st.markdown("""
+            <div style='display: flex; align-items: center; gap: 8px; margin-bottom: 10px;'>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0066cc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <circle cx="12" cy="12" r="3"></circle>
+                </svg>
+                <h4 style='margin: 0; color: #1E293B;'>Geographic Scatter Plot</h4>
+            </div>
+        """, unsafe_allow_html=True)
         fig4, ax4 = plt.subplots(figsize=(6, 4))
         route_lons = [float(c[0]) for c in coords]
         route_lats = [float(c[1]) for c in coords]
@@ -530,46 +654,138 @@ def generate_matplotlib_charts(df: pd.DataFrame, result: Dict[str, Any], mode: s
         ax4.legend()
         st.pyplot(fig4)
 
-    # Third Row: NEW 5th Chart - Route Deviation Comparison
+    # Third Row: Distance Viability & New Risk Comparison
     alt_dist = result.get('alt_distance', 0)
     if alt_dist > 0:
         st.markdown("---")
-        st.write("### ⚖️ Route Viability & Deviation Comparison")
         
-        # DYNAMIC REAL-TIME AI EXPLANATION
-        chart_insight_text = generate_chart_insight(result.get("milestones", []), result.get('distance', 0), alt_dist)
-        st.info(f"**Logistics Insight:** {chart_insight_text}")
+        col5, col6 = st.columns(2)
         
-        fig5, ax5 = plt.subplots(figsize=(10, 4))
-        
-        categories = ['Total Distance (km)', 'Est. Transit Time (Hours)']
-        primary_vals = [result.get('distance', 0), result.get('primary_duration', 0)]
-        alt_vals = [alt_dist, result.get('alt_duration', 0)]
-        
-        x = [0, 1]
-        width = 0.35
-        
-        ax5.bar([i - width/2 for i in x], primary_vals, width, label='Primary Route', color='#d62728')
-        ax5.bar([i + width/2 for i in x], alt_vals, width, label='Alternative Route', color='#2ca02c')
-        
-        ax5.set_ylabel('Measurement')
-        ax5.set_xticks(x)
-        ax5.set_xticklabels(categories)
-        ax5.legend()
-        
-        max_height = max(primary_vals + alt_vals)
-        for i, val in enumerate(primary_vals):
-            ax5.text(i - width/2, val + (max_height * 0.02), f"{val:.1f}", ha='center', fontweight='bold')
-        for i, val in enumerate(alt_vals):
-            ax5.text(i + width/2, val + (max_height * 0.02), f"{val:.1f}", ha='center', fontweight='bold')
+        with col5:
+            st.markdown("""
+                <div style='display: flex; align-items: center; gap: 10px; margin-bottom: 15px;'>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#DAA520" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="3" x2="12" y2="21"></line>
+                        <path d="M3 13.5l4-8 4 8H3z"></path>
+                        <path d="M13 13.5l4-8 4 8h-8z"></path>
+                        <line x1="3" y1="13.5" x2="21" y2="13.5"></line>
+                    </svg>
+                    <h3 style='margin: 0; color: #1E293B; font-weight: 600;'>Route Viability Comparison</h3>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # DYNAMIC REAL-TIME AI EXPLANATION
+            chart_insight_text = generate_chart_insight(
+                milestones=result.get("milestones", []), 
+                alt_milestones=result.get("alt_milestones", []), 
+                primary_dist=result.get('distance', 0), 
+                alt_dist=alt_dist
+            )
+            st.info(f"**Logistics Insight:** {chart_insight_text}")
+            
+            fig5, ax5 = plt.subplots(figsize=(6, 4))
+            
+            categories = ['Total Distance (km)', 'Est. Transit Time (Hrs)']
+            primary_vals = [result.get('distance', 0), result.get('primary_duration', 0)]
+            alt_vals = [alt_dist, result.get('alt_duration', 0)]
+            
+            x = [0, 1]
+            width = 0.35
+            
+            ax5.bar([i - width/2 for i in x], primary_vals, width, label='Primary Route', color='#d62728')
+            ax5.bar([i + width/2 for i in x], alt_vals, width, label='Alternative Route', color='#DAA520')
+            
+            ax5.set_ylabel('Measurement')
+            ax5.set_xticks(x)
+            ax5.set_xticklabels(categories)
+            ax5.legend()
+            
+            max_height = max(primary_vals + alt_vals)
+            for i, val in enumerate(primary_vals):
+                ax5.text(i - width/2, val + (max_height * 0.02), f"{val:.1f}", ha='center', fontweight='bold')
+            for i, val in enumerate(alt_vals):
+                ax5.text(i + width/2, val + (max_height * 0.02), f"{val:.1f}", ha='center', fontweight='bold')
+    
+            st.pyplot(fig5)
 
-        st.pyplot(fig5)
+        with col6:
+            # --- NEW 6TH CHART: Risk Profile Comparison ---
+            st.markdown("""
+                <div style='display: flex; align-items: center; gap: 10px; margin-bottom: 15px;'>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#8c564b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                        <line x1="12" y1="9" x2="12" y2="13"></line>
+                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                    <h3 style='margin: 0; color: #1E293B; font-weight: 600;'>Real-Time Risk Profile Comparison</h3>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            st.info("**Risk Matrix Insight:** This graph explicitly shows the count of severe vs moderate bottlenecks detected live on both routes.")
+
+            alt_milestones = result.get("alt_milestones", [])
+            
+            primary_severe = len([m for m in result.get("milestones", []) if m['Risk Level'] in ['High', 'Critical']])
+            alt_severe = len([m for m in alt_milestones if m.get('Risk Level', 'Low') in ['High', 'Critical']])
+            
+            primary_med = len([m for m in result.get("milestones", []) if m['Risk Level'] == 'Medium'])
+            alt_med = len([m for m in alt_milestones if m.get('Risk Level', 'Low') == 'Medium'])
+
+            fig6, ax6 = plt.subplots(figsize=(6, 4))
+            
+            risk_labels = ['Severe Risks (High/Critical)', 'Moderate Risks (Medium)']
+            prim_counts = [primary_severe, primary_med]
+            alt_counts = [alt_severe, alt_med]
+            
+            x_risk = [0, 1]
+            
+            ax6.bar([i - width/2 for i in x_risk], prim_counts, width, label='Primary Route', color='#d62728')
+            ax6.bar([i + width/2 for i in x_risk], alt_counts, width, label='Alternative Route', color='#DAA520')
+            
+            ax6.set_ylabel('Number of Occurrences')
+            ax6.set_xticks(x_risk)
+            ax6.set_xticklabels(risk_labels)
+            
+            max_y = max(max(prim_counts), max(alt_counts))
+            if max_y < 5: ax6.set_ylim(0, max_y + 1.5)
+            
+            ax6.legend()
+            
+            for i, val in enumerate(prim_counts):
+                ax6.text(i - width/2, val + 0.1, str(val), ha='center', fontweight='bold')
+            for i, val in enumerate(alt_counts):
+                ax6.text(i + width/2, val + 0.1, str(val), ha='center', fontweight='bold')
+
+            st.pyplot(fig6)
 
 
 # --- UI ---
 def main():
-    st.title("🌍 Global Supply Chain Nexus")
-    st.markdown("##### Advanced AI Routing, Real-Time Geo-Risk Analysis, & Maritime Tracking.")
+    
+    # Custom CSS for the Header Logo integration
+    st.markdown("""
+        <style>
+            .header-text { margin: 0; padding: 0; font-size: 2.2rem; font-weight: 700; color: #1E293B; }
+            .sub-text { color: #475569; font-size: 1.1rem; margin-top: 0; margin-bottom: 25px; }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Header Columns Setup
+    col_logo, col_title = st.columns([1, 4])
+    
+    with col_logo:
+        try:
+            st.image("asb_logo_light.png", width='stretch')
+        except Exception:
+            st.warning("Logo file not found. Please ensure 'asb_logo_light.png' is in the directory.")
+            
+    with col_title:
+        st.markdown("""
+            <div style='display: flex; flex-direction: column; justify-content: center; height: 100%;'>
+                <h1 class='header-text'>Global Supply Chain Nexus</h1>
+                <p class='sub-text'>Advanced AI Routing, Real-Time Geo-Risk Analysis, & Maritime Tracking.</p>
+            </div>
+        """, unsafe_allow_html=True)
 
     if 'report_generated' not in st.session_state:
         st.session_state.report_generated = False
@@ -581,7 +797,16 @@ def main():
         st.session_state.reroute_strategy = ""
 
     with st.sidebar:
-        st.header("Route Configuration")
+        
+        try:
+            st.image("asb_logo_light.png", width='stretch')
+            st.markdown("<hr style='margin-top: 5px; margin-bottom: 15px;'>", unsafe_allow_html=True)
+        except Exception:
+            pass
+            
+        st.markdown("""
+            <h2 style='color: #1E293B; font-size: 1.3rem; margin-bottom: 15px;'>Route Configuration</h2>
+        """, unsafe_allow_html=True)
         mode_input = st.selectbox("Select Transport Mode", ["Roadways", "Seaways"])
         
         default_origin = "Mumbai Port" if mode_input == "Seaways" else "Mumbai, India"
@@ -610,7 +835,8 @@ def main():
                 origin=origin_input, 
                 dest=destination_input,
                 primary_distance=result["distance"],
-                alt_info=result["alt_info"]
+                alt_info=result["alt_info"],
+                alt_milestones=result.get("alt_milestones", [])
             )
             
             st.session_state.mode = mode_input
@@ -627,15 +853,71 @@ def main():
             color = 'green' if val == 'Low' else 'orange' if val == 'Medium' else 'red' if val in ['High', 'Critical'] else 'black'
             return f'color: {color}; font-weight: bold'
 
-        st.subheader("🤖 Executive Briefing & Rerouting Strategy")
+        st.markdown("""
+            <div style='display: flex; align-items: center; gap: 10px; margin-top: 20px; margin-bottom: 10px;'>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="16" x2="12" y2="12"></line>
+                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                </svg>
+                <h3 style='margin: 0; color: #334155; font-size: 1.5rem; font-weight: 600;'>Executive Briefing & Rerouting Strategy</h3>
+            </div>
+        """, unsafe_allow_html=True)
         st.info(st.session_state.reroute_strategy)
 
-        st.subheader(f"📋 Geographic Intelligence Report ({len(milestones)} Milestones Found)")
-        df = pd.DataFrame(milestones)
-        styled_df = df.style.map(color_risk, subset=['Risk Level'])
-        st.dataframe(styled_df, width="stretch")
+        st.markdown("""
+            <div style='display: flex; align-items: center; gap: 10px; margin-top: 30px; margin-bottom: 15px;'>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                    <polyline points="10 9 9 9 8 9"></polyline>
+                </svg>
+                <h3 style='margin: 0; color: #334155; font-size: 1.5rem; font-weight: 600;'>Geographic Intelligence Reports</h3>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        # --- TABBED DATAFRAME VIEW FOR SIDE-BY-SIDE COMPARISON ---
+        tab1, tab2 = st.tabs(["🔴 Primary Route Data", "🟡 Alternative Route Data"])
+        
+        with tab1:
+            df_primary = pd.DataFrame(milestones)
+            df_primary['Temp (°C)'] = df_primary['Temp (°C)'].astype(str)
+            df_primary['Wave Height'] = df_primary['Wave Height'].astype(str)
+            styled_primary = df_primary.style.map(color_risk, subset=['Risk Level'])
+            st.dataframe(styled_primary, use_container_width=True) 
+            
+            csv_primary = df_primary.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Export Primary Route (CSV)", data=csv_primary, file_name=f"{mode}_primary_report.csv", mime="text/csv", key="btn_primary")
 
-        st.subheader("🗺️ Dynamic Risk Terrain Map")
+        with tab2:
+            alt_milestones = result.get("alt_milestones", [])
+            if alt_milestones:
+                df_alt = pd.DataFrame(alt_milestones)
+                df_alt['Temp (°C)'] = df_alt['Temp (°C)'].astype(str)
+                if 'Wave Height' not in df_alt.columns:
+                    df_alt['Wave Height'] = 'N/A'
+                df_alt['Wave Height'] = df_alt['Wave Height'].astype(str)
+                
+                styled_alt = df_alt.style.map(color_risk, subset=['Risk Level'])
+                st.dataframe(styled_alt, use_container_width=True)
+                
+                csv_alt = df_alt.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Export Alternative Route (CSV)", data=csv_alt, file_name=f"{mode}_alt_report.csv", mime="text/csv", key="btn_alt")
+            else:
+                st.info("No alternative route data available for this journey.")
+
+        st.markdown("""
+            <div style='display: flex; align-items: center; gap: 10px; margin-top: 30px; margin-bottom: 15px;'>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"></polygon>
+                    <line x1="9" y1="3" x2="9" y2="18"></line>
+                    <line x1="15" y1="6" x2="15" y2="21"></line>
+                </svg>
+                <h3 style='margin: 0; color: #334155; font-size: 1.5rem; font-weight: 600;'>Dynamic Risk Terrain Map</h3>
+            </div>
+        """, unsafe_allow_html=True)
         
         color_map = {'Low': 'green', 'Medium': 'orange', 'High': 'red', 'Critical': 'darkred'}
         
@@ -660,18 +942,19 @@ def main():
             attributes={'fill': '#0066cc', 'font-weight': 'bold', 'font-size': '16'}
         ).add_to(m)
 
-        # Plot Alternative Route
+        # Plot Alternative Route (Now Dark Yellow)
         if result.get("alt_coords"):
             alt_folium_coords = [[float(c[1]), float(c[0])] for c in result["alt_coords"]]
             folium.PolyLine(
                 locations=alt_folium_coords,
-                color="darkred", 
+                color="#DAA520", # Goldenrod / Dark Yellow 
                 weight=5,
                 opacity=0.9,
                 dash_array='8, 8',
                 tooltip="Recommended Alternative Route"
             ).add_to(m)
 
+        # Plot Primary Route Markers
         for row in milestones:
             risk_level = str(row['Risk Level'])
             marker_color = color_map.get(risk_level, 'gray')
@@ -696,27 +979,72 @@ def main():
                 icon=folium.Icon(color=marker_color, icon="info-sign")
             )
             
-            tooltip_html = f'<span style="font-weight: bold; font-size: 11px; white-space: nowrap;">{location_name}</span>'
-            marker.add_child(folium.Tooltip(tooltip_html, permanent=True, direction="auto", opacity=0.85))
+            tooltip_html = f'<span style="font-weight: bold; font-size: 12px; white-space: nowrap; background-color: rgba(255,255,255,0.7);">{location_name}</span>'
+            marker.add_child(folium.Tooltip(tooltip_html, permanent=False, direction="top", opacity=0.9))
             marker.add_to(m)
 
-        raw_bounds = route_line.get_bounds()
-        clean_bounds = []
-        for point in raw_bounds:
-            if point and len(point) >= 2 and point[0] is not None and point[1] is not None:
-                clean_bounds.append([float(point[0]), float(point[1])])
-                
-        if clean_bounds:
-            m.fit_bounds(clean_bounds)
+        # Plot Alternative Route Markers
+        for row in result.get("alt_milestones", []):
+            risk_level = str(row['Risk Level'])
+            marker_color = color_map.get(risk_level, 'gray')
+            
+            lat = float(row['Lat'])
+            lon = float(row['Lon'])
+            location_name = str(row['Location']) + " (ALT ROUTE)"
+            
+            popup_html = f"""
+            <div style="width:250px;">
+                <h4 style="color:#DAA520;">{location_name}</h4>
+                <b>Risk:</b> <span style="color:{marker_color}; font-weight:bold;">{risk_level}</span><br>
+                <b>Weather:</b> {row['Temp (°C)']}°C, {row['Weather']}<br>
+                <b>Regional Intel:</b> {row['Local News']}<br>
+                <b>Security Note:</b> {row['AI Intelligence']}
+            </div>
+            """
+            
+            marker = folium.Marker(
+                location=[lat, lon],
+                popup=folium.Popup(popup_html, max_width=300),
+                icon=folium.Icon(color='orange', icon='star', icon_color='white')
+            )
+            
+            tooltip_html = f'<span style="font-weight: bold; font-size: 12px; white-space: nowrap; background-color: rgba(255,255,255,0.7);">{location_name}</span>'
+            marker.add_child(folium.Tooltip(tooltip_html, permanent=False, direction="top", opacity=0.9))
+            marker.add_to(m)
+
+        # Calculate bounds to automatically zoom and center the map
+        all_lats = []
+        all_lons = []
+        
+        for c in result.get("coords", []):
+            all_lats.append(float(c[1]))
+            all_lons.append(float(c[0]))
+            
+        for c in result.get("alt_coords", []):
+            all_lats.append(float(c[1]))
+            all_lons.append(float(c[0]))
+            
+        if all_lats and all_lons:
+            m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]])
 
         st_folium(m, width=1200, height=600, use_container_width=True, returned_objects=[])
 
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Export Logistics Data (CSV)", data=csv, file_name=f"{mode}_supply_chain_report.csv", mime="text/csv")
-
         st.markdown("---")
-        st.subheader("📊 Advanced Operational Analytics")
-        generate_matplotlib_charts(df, result, mode)
+        st.markdown("""
+            <div style='display: flex; align-items: center; gap: 10px; margin-top: 10px; margin-bottom: 20px;'>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="18" y1="20" x2="18" y2="10"></line>
+                    <line x1="12" y1="20" x2="12" y2="4"></line>
+                    <line x1="6" y1="20" x2="6" y2="14"></line>
+                </svg>
+                <h3 style='margin: 0; color: #334155; font-size: 1.5rem; font-weight: 600;'>Advanced Operational Analytics</h3>
+            </div>
+        """, unsafe_allow_html=True)
+        # Fix for Dataframe passing to charts
+        df_for_charts = pd.DataFrame(milestones)
+        df_for_charts['Temp (°C)'] = df_for_charts['Temp (°C)'].astype(str)
+        df_for_charts['Wave Height'] = df_for_charts['Wave Height'].astype(str)
+        generate_matplotlib_charts(df_for_charts, result, mode)
 
 if __name__ == "__main__":
     main()
