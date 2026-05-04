@@ -13,16 +13,21 @@ import seaborn as sns
 import folium
 from folium import plugins
 from streamlit_folium import st_folium
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
 from groq import Groq
 from geopy.adapters import AioHTTPAdapter
-from geopy.geocoders import ArcGIS, Nominatim
+from geopy.geocoders import ArcGIS
 
 # --- CONFIGURATION & API KEYS ---
 st.set_page_config(page_title="Supply Chain Intelligence Nexus", layout="wide", initial_sidebar_state="expanded")
 
-load_dotenv()
+# Aggressively locate and load the .env file
+dotenv_path = find_dotenv()
+if dotenv_path:
+    load_dotenv(dotenv_path, override=True)
+else:
+    st.warning("⚠️ .env file not found automatically. Make sure it is named exactly '.env' and is in the same folder as app4.py")
 
 TIMEOUT = 15
 MAX_RETRIES = 3
@@ -35,7 +40,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 if not GROQ_API_KEY or not OPENWEATHER_API_KEY:
     st.warning("⚠️ API keys are missing! Please ensure OPENWEATHER_API_KEY and GROQ_API_KEY are set in your .env file.")
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+# Only initialize the client if the key exists to prevent crashing
+if GROQ_API_KEY:
+    groq_client = Groq(api_key=GROQ_API_KEY)
+else:
+    groq_client = None
 
 
 # --- HELPER FUNCTIONS ---
@@ -136,9 +145,10 @@ async def get_marine_region_name(lat: float, lon: float) -> str:
     except Exception: pass
     return "Open Ocean Waters"
 
-
 # --- 2. AI INTELLIGENCE INTEGRATION ---
 def get_llm_risk_assessment(location: str, lat: float, lon: float, mode: str, temp: Any, condition: str, waves: str, news: str) -> Dict[str, str]:
+    if not groq_client: return {"Risk": "Medium", "Details": "API Key missing. Cannot generate AI risk assessment."}
+    
     loc_str = location if location else "Unknown Location"
     news_str = news if news else "No news available."
     
@@ -193,6 +203,8 @@ def get_llm_risk_assessment(location: str, lat: float, lon: float, mode: str, te
         return {"Risk": "Medium", "Details": f"Regional risk assessment unavailable (API Issue)."}
 
 def generate_rerouting_suggestion(milestones: List[Dict[str, Any]], mode: str, origin: str, dest: str, primary_distance: float, alt_info: str, alt_milestones: List[Dict[str, Any]]) -> str:
+    if not groq_client: return "API Key missing. Cannot generate intelligence briefing."
+    
     if not milestones:
         return "Intelligence Briefing Error: No routing milestones were generated to evaluate."
         
@@ -290,6 +302,7 @@ def generate_rerouting_suggestion(milestones: List[Dict[str, Any]], mode: str, o
         return f"Strategic intelligence briefing unavailable at this time. (API Error)"
 
 def generate_chart_insight(milestones: List[Dict[str, Any]], alt_milestones: List[Dict[str, Any]], primary_dist: float, alt_dist: float) -> str:
+    if not groq_client: return "Insight unavailable due to missing API Key."
     if not milestones: return "Telemetry data unavailable for insight generation."
     
     primary_risks = [m for m in milestones if m.get('Risk Level') in ['High', 'Critical']]
@@ -453,7 +466,7 @@ async def calculate_road_route(src: str, dest: str) -> Dict[str, Any]:
                     
                     if alt_places:
                         alt_waypoints_text = f" This strategic deviation physically routes through {len(alt_places)} distinct regional monitoring zones."
-
+                
                 alt_info = f"An alternative geographical deviation is mapped. It measures {alt_distance:.1f} km with an estimated transit time of {alt_duration:.1f} hours.{alt_waypoints_text}"
         
         interval = max(1, len(coords) // 15) 
@@ -511,23 +524,17 @@ async def calculate_road_route(src: str, dest: str) -> Dict[str, Any]:
             "alt_info": alt_info
         }
 
-async def get_coordinates_nominatim(place_name: str) -> Optional[List[float]]:
-    if not place_name: return None
-    async with Nominatim(user_agent=USER_AGENT, adapter_factory=AioHTTPAdapter) as geolocator:
-        try:
-            location = await geolocator.geocode(place_name, timeout=10) # type: ignore
-            if location and hasattr(location, 'longitude') and hasattr(location, 'latitude'): 
-                return [location.longitude, location.latitude]
-        except Exception: pass
-    return None
-
 async def calculate_sea_route(src: str, dest: str) -> Dict[str, Any]:
-    origin = await get_coordinates_nominatim(src)
-    await asyncio.sleep(1.1)
-    dest_loc = await get_coordinates_nominatim(dest)
+    async with ArcGIS(adapter_factory=AioHTTPAdapter) as geolocator:
+        origin_data = await geocode_place_arcgis(src, geolocator)
+        dest_data = await geocode_place_arcgis(dest, geolocator)
     
-    if not origin or not dest_loc: 
-        return {"error": "Geospatial coordinate mapping failed. Nominatim could not locate the port cities."}
+    if not origin_data or not dest_data: 
+        return {"error": "Geospatial coordinate mapping failed. The geocoder could not locate the port cities."}
+
+    # Searoute expects [longitude, latitude] arrays
+    origin = [origin_data['lon'], origin_data['lat']]
+    dest_loc = [dest_data['lon'], dest_data['lat']]
 
     try:
         route = sr.searoute(origin, dest_loc) # type: ignore
@@ -589,7 +596,6 @@ async def calculate_sea_route(src: str, dest: str) -> Dict[str, Any]:
         "alt_milestones": [],
         "alt_info": ""
     }
-
 
 # --- DATA VISUALIZATIONS ---
 def generate_matplotlib_charts(df: pd.DataFrame, result: Dict[str, Any], mode: str):
@@ -739,7 +745,6 @@ def generate_matplotlib_charts(df: pd.DataFrame, result: Dict[str, Any], mode: s
     if alt_dist > 0 and mode == "Roadways":
         st.markdown("<hr style='border-color: #e2e8f0;'>", unsafe_allow_html=True)
         
-        # --- BRAND NEW PERCENTAGE CHART ---
         st.markdown("""
         <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 15px;">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7e22ce" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -794,7 +799,6 @@ def generate_matplotlib_charts(df: pd.DataFrame, result: Dict[str, Any], mode: s
         ax_pct.legend(loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=4)
         st.pyplot(fig_pct)
         st.markdown("<hr style='border-color: #e2e8f0; margin-bottom: 30px;'>", unsafe_allow_html=True)
-
 
         col5, col6 = st.columns(2)
         
@@ -891,7 +895,6 @@ def generate_matplotlib_charts(df: pd.DataFrame, result: Dict[str, Any], mode: s
                 ax6.text(i + width_bar/2, val + 0.1, str(val), ha='center', fontweight='bold')
 
             st.pyplot(fig6)
-
 
 # --- UI ---
 def main():
